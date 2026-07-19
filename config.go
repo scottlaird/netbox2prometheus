@@ -29,10 +29,17 @@ type Config struct {
 		Host  string `json:"host,omitempty"`
 		Token string `json:"token,omitempty"`
 	} `json:"netbox"`
-	KeaDirectory   string `json:"kea_directory,omitempty"`
-	PrefixTag      string `json:"prefix_tag,omitempty"`
-	RangeTag       string `json:"range_tag,omitempty"`
-	MacCustomField string `json:"mac_custom_field,omitempty"`
+
+	DNSRefresh   string `json:"dns_refresh,omitempty"`
+	DNSServer    string `json:"dns_server,omitempty"`
+	ICMPInterval string `json:"icmp_interval,omitempty"`
+	ICMPTimeout  string `json:"icmp_timeout,omitempty"`
+	ICMPCount    int    `jcon:"icmp_count,omitempty"`
+
+	DomainName          string `json:"domain_name,omitempty"`
+	PrometheusDirectory string `json:"prometheus_directory,omitempty"`
+	PingTagSlug         string `json:"ping_tag_slug,omitempty"`
+	SNMPTagSlug         string `json:"snmp_tag_slug,omitempty"`
 }
 
 // This causes "config.cue" in the current directory to be embedded
@@ -43,8 +50,8 @@ var cueSchema []byte
 
 // List of directories to search for config files.
 var configDirs = []string{
-	"/usr/local/etc/netbox2kea",
-	"/etc/netbox2kea",
+	"/usr/local/etc/netbox2prometheus",
+	"/etc/netbox2prometheus",
 	".",
 }
 

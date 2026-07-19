@@ -1,52 +1,56 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"flag"
 	"fmt"
 	"log"
-	"net/netip"
-	"os"
-	"path/filepath"
-	"slices"
 	"strings"
+	"unicode"
 
-	httptransport "github.com/go-openapi/runtime/client"
-	"github.com/netbox-community/go-netbox/v3/netbox/client"
-	"github.com/scottlaird/netboxlib/netbox"
-	"inet.af/netaddr"
+	netbox "github.com/netbox-community/go-netbox/v4"
+	"go.yaml.in/yaml/v4"
 )
-
-type DHCPNetwork struct {
-	Protocol int          `json:"-"`
-	Prefix   netip.Prefix `json:"subnet"`
-	Ranges   []DHCPRange  `json:"pools"`
-	Hosts    []*DHCPHost  `json:"reservations"`
-	Router   netip.Addr   `json:"-"`
-	Options  []DHCPOption `json:"option-data,omitempty"`
-	ID       int          `json:"id,omitempty"`
-}
-
-type DHCPRange struct {
-	Start, Stop netip.Addr `json:"-"`
-	Pool        string     `json:"pool"`
-	ClientClass string     `json:"client-class,omitempty"`
-}
-
-type DHCPHost struct {
-	Name string     `json:"hostname"`
-	Addr netip.Addr `json:"ip-address"`
-	MAC  string     `json:"hw-address"`
-}
-
-type DHCPOption struct {
-	Name string `json:"name"`
-	Data string `json:"data"`
-}
 
 var (
 	config = flag.String("config", "", "Path of a config file, with a .yaml, .json, or .cue extension")
 )
+
+type NEPingTarget struct {
+	Name string `yaml:"name"`
+	Host string `yaml:"host"`
+	Type string `yaml:"type"`
+}
+
+type NEConf struct {
+	Refresh    string `yaml:"refresh"`
+	Nameserver string `yaml:"nameserver"`
+}
+
+type NEICMP struct {
+	Interval string `yaml:"interval"`
+	Timeout  string `yaml:"timeout"`
+	Count    int    `yaml:"count"`
+}
+
+type NEConfig struct {
+	Config  NEConf         `yaml:"conf"`
+	Icmp    NEICMP         `yaml:"icmp"`
+	Targets []NEPingTarget `yaml:"targets"`
+}
+
+type PEConfig struct {
+	DNS     NEConf   `yaml:"dns"` // Identical between ping_exporter and network_exporter
+	Ping    PEPing   `yaml:"ping"`
+	Targets []string `yaml:"targets"`
+}
+
+type PEPing struct {
+	Interval    string `yaml:"interval"`
+	Timeout     string `yaml:"timeout"`
+	HistorySize int    `yaml:"historysize"`
+	PayloadSize int    `yaml:"payloadsize"`
+}
 
 func main() {
 	flag.Parse()
@@ -55,7 +59,7 @@ func main() {
 	var err error
 	file := *config
 	if file == "" {
-		file, err = FindConfig("netbox2kea")
+		file, err = FindConfig("netbox2prometheus")
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -65,156 +69,96 @@ func main() {
 		log.Fatalf("Failed to parse config: %v", err)
 	}
 
-	dhcpNetworks := make(map[netip.Prefix]*DHCPNetwork)
+	c := netbox.NewAPIClientFor(cfg.Netbox.Host, cfg.Netbox.Token)
+	ctx := context.Background()
 
-	transport := httptransport.New(cfg.Netbox.Host, client.DefaultBasePath, []string{"https"})
-	transport.DefaultAuthentication = httptransport.APIKeyAuth("Authorization", "header", "Token "+cfg.Netbox.Token)
-	c := client.New(transport, nil)
+	targets := []NEPingTarget{}
 
 	// Fetch address, range, and prefix data from Netbox
-	prefixes, err := netbox.ListIPPrefixes(c)
+	devices, _, err := c.DcimAPI.DcimDevicesList(ctx).
+		Tag([]string{cfg.PingTagSlug}).
+		Limit(9999).
+		Execute()
 	if err != nil {
 		panic(err)
 	}
 
-	addrs, err := netbox.ListIPAddrs(c)
+	for _, device := range devices.GetResults() {
+		name := hostname(*device.Name.Get(), cfg.DomainName)
+		targets = append(targets, NEPingTarget{
+			Name: name,
+			Host: name,
+			Type: "ICMP",
+		})
+	}
+
+	ips, _, err := c.IpamAPI.IpamIpAddressesList(ctx).
+		Tag([]string{cfg.PingTagSlug}).
+		Limit(9999).
+		Execute()
+	if err != nil {
+		panic(err)
+	}
+	for _, ip := range ips.GetResults() {
+		name := hostname(ip.Address, cfg.DomainName) // Mostly just truncate the CIDR string
+		targets = append(targets, NEPingTarget{
+			Name: name,
+			Host: name,
+			Type: "ICMP",
+		})
+	}
+
+	neconfig := NEConfig{
+		Config: NEConf{
+			Refresh:    cfg.DNSRefresh,
+			Nameserver: cfg.DNSServer,
+		},
+		Icmp: NEICMP{
+			Interval: cfg.ICMPInterval,
+			Timeout:  cfg.ICMPTimeout,
+			Count:    cfg.ICMPCount,
+		},
+		Targets: targets,
+	}
+
+	petargets := []string{}
+	for _, t := range targets {
+		petargets = append(petargets, t.Name)
+	}
+
+	peconfig := PEConfig{
+		DNS: neconfig.Config,
+		Ping: PEPing{
+			Interval:    cfg.ICMPInterval,
+			Timeout:     cfg.ICMPTimeout,
+			HistorySize: 42,
+			PayloadSize: 120,
+		},
+		Targets: petargets,
+	}
+
+	ne, err := yaml.Marshal(&neconfig)
 	if err != nil {
 		panic(err)
 	}
 
-	ranges, err := netbox.ListIPRanges(c)
+	fmt.Println(string(ne))
+
+	pe, err := yaml.Marshal(&peconfig)
 	if err != nil {
 		panic(err)
 	}
 
-	slices.SortFunc(prefixes, func(a, b *netbox.IPPrefix) int {
-		return strings.Compare(a.Prefix.String(), b.Prefix.String())
-	})
-
-	networkID:=1;
-	for _, prefix := range prefixes {
-		if prefix.Tags[cfg.PrefixTag] {
-			net := &DHCPNetwork{
-				Prefix: prefix.Prefix,
-				Ranges: []DHCPRange{},
-				Hosts:  []*DHCPHost{},
-				ID: networkID,
-			}
-			networkID++
-			
-			if prefix.Prefix.Addr().Is4() {
-				net.Protocol = 4
-			} else if prefix.Prefix.Addr().Is6() {
-				net.Protocol = 6
-			}
-			dhcpNetworks[prefix.Prefix] = net
-
-			if net.Protocol == 4 {
-				// Find the highest IP in this netblock, .254 in a /24, etc.
-				pf := netaddr.MustParseIPPrefix(prefix.Prefix.String())
-				router := pf.Range().To().Prior().String()
-				net.Router = netip.MustParseAddr(router)
-			}
-
-			if net.Router.IsValid() {
-				net.Options = append(net.Options, DHCPOption{Name: "routers", Data: net.Router.String()})
-			}
-		}
-	}
-
-	haclass := 0
-	for _, r := range ranges {
-		haclass++
-		if haclass > 2 {
-			haclass = 1
-		}
-		if r.Tags[cfg.RangeTag] {
-			rr := DHCPRange{
-				Start: r.StartAddress.Addr(),
-				Stop:  r.EndAddress.Addr(),
-			}
-			rr.Pool = rr.Start.String() + " - " + rr.Stop.String()
-			rr.ClientClass = fmt.Sprintf("HA_server%d", haclass)
-
-			found := false
-			for prefix, net := range dhcpNetworks {
-				if prefix.Contains(rr.Start) {
-					net.Ranges = append(net.Ranges, rr)
-					found = true
-				}
-			}
-			if found == false {
-				fmt.Printf("Could not match range %s-%s to network!\n", rr.Start.String(), rr.Stop.String())
-			}
-		}
-	}
-
-	for _, addr := range addrs {
-		if mac, ok := addr.CustomFields[cfg.MacCustomField]; ok {
-			if mac.IsValid() {
-				val, ok := mac.Interface().(string)
-
-				if ok {
-					host := &DHCPHost{
-						Name: addr.DNSName,
-						Addr: addr.Address.Addr(),
-						MAC:  val,
-					}
-
-					found := false
-					for prefix, net := range dhcpNetworks {
-						if prefix.Contains(host.Addr) {
-							net.Hosts = append(net.Hosts, host)
-							found = true
-						}
-					}
-					if found == false {
-						fmt.Printf("Could not match host %s to network!\n", host.Addr.String())
-					}
-				}
-			}
-		}
-	}
-
-	for prefix, net := range dhcpNetworks {
-		if len(net.Ranges) == 0 {
-			delete(dhcpNetworks, prefix)
-		}
-	}
-
-	nets := make(map[int][]*DHCPNetwork)
-
-	// Needed so that JSON encoding returns [] instead of null
-	// when no nets are found.
-	nets[4] = []*DHCPNetwork{}
-	nets[6] = []*DHCPNetwork{}
-
-	for _, net := range dhcpNetworks {
-		nets[net.Protocol] = append(nets[net.Protocol], net)
-	}
-
-	err = WriteNetwork(filepath.Join(cfg.KeaDirectory, "subnet4.json"), nets[4])
-	if err != nil {
-		panic(err)
-	}
-	err = WriteNetwork(filepath.Join(cfg.KeaDirectory, "subnet6.json"), nets[6])
-	if err != nil {
-		panic(err)
-	}
+	fmt.Println(string(pe))
 }
 
-func WriteNetwork(filename string, nets []*DHCPNetwork) error {
-	out, err := os.Create(filename)
-	if err != nil {
-		return err
+func hostname(name string, domain string) string {
+	if unicode.IsNumber(rune(name[0])) {
+		split := strings.Split(name, "/")
+		return split[0] // probably an IP address, truncate '/' but otherwise leave alone.
 	}
-	defer out.Close()
-
-	b, err := json.MarshalIndent(nets, "", "  ")
-	if err != nil {
-		return err
+	if strings.Contains(name, ".") {
+		return name // already a FQDN
 	}
-
-	_, err = out.Write(b)
-	return err
+	return name + "." + domain // Append the domain name
 }

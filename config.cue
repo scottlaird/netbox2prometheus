@@ -1,4 +1,4 @@
-// This defines the configuration format for netbox2kea, along with
+// This defines the configuration format for netbox2prometheus, along with
 // validation rules for each field.  See http://cuelang.org for
 // documenation.
 
@@ -10,9 +10,15 @@ config: {
 		token: string
 	}
 
-	kea_directory: *"/etc/kea" | string
+	dns_refresh: *"5m" | string
+	dns_server: *"8.8.8.8" | string
+	icmp_interval: *"3s" | string
+	icmp_timeout: *"500ms" | string
+	icmp_count: *6 | int
+
+	domain_name: *"internal.sigkill.org" | string
+	prometheus_directory: *"/etc/prometheus" | string
 	
-	prefix_tag:     *"subnet:dhcp" | string
-	range_tag:       *"subnet:dhcp:range" | string
-	mac_custom_field: *"mac_address" | string
+	ping_tag_slug:     *"monitoringping_test" | string
+	snmp_tag_slug:       *"monitoring:snmp" | string
 }
