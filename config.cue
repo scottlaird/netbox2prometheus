@@ -10,6 +10,8 @@ config: {
 		token: string
 	}
 
+	output_directory: *"/config/prometheus" | string
+
 	dns_refresh: *"5m" | string
 	dns_server: *"8.8.8.8" | string
 	icmp_interval: *"3s" | string

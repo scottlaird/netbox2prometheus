@@ -30,6 +30,8 @@ type Config struct {
 		Token string `json:"token,omitempty"`
 	} `json:"netbox"`
 
+	OutputDirectory string `json:"output_directory,omitempty"`
+
 	DNSRefresh   string `json:"dns_refresh,omitempty"`
 	DNSServer    string `json:"dns_server,omitempty"`
 	ICMPInterval string `json:"icmp_interval,omitempty"`
