@@ -87,3 +87,32 @@ func TestRxPowerRulesYAML(t *testing.T) {
 	}
 	t.Logf("\n%s", data)
 }
+
+// TestRxPowerSourcesEOS pins the Arista conversion, which is easy to get wrong:
+// EOS reports milliwatts scaled by 10^4, not dBm, and carries the interface
+// name only inside entPhysicalDescr.
+func TestRxPowerSourcesEOS(t *testing.T) {
+	var expr string
+	for _, source := range rxPowerSources {
+		if source.Platform == "eos" {
+			expr = source.Expr
+		}
+	}
+	if expr == "" {
+		t.Fatal("no eos source found")
+	}
+	for _, want := range []string{
+		"10 * log10(",                        // milliwatts to dBm
+		"/ 10000)",                           // entPhySensorPrecision 4
+		`"ifName", "$1", "entPhysicalDescr"`, // descr carries the interface
+		`DOM RX Power Sensor for (.*)`,       // and only receive power
+		"} > 0)",                             // unlit optics excluded
+	} {
+		if !strings.Contains(expr, want) {
+			t.Errorf("eos expr missing %q:\n%s", want, expr)
+		}
+	}
+	if strings.Contains(expr, "entPhysicalName") {
+		t.Errorf("eos expr uses entPhysicalName, which is empty on EOS:\n%s", expr)
+	}
+}

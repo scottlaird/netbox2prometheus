@@ -54,12 +54,24 @@ var rxPowerSources = []rxPowerSource{
 		Expr:     "jnxDomCurrentRxLaserPower",
 	},
 	{
-		// Arista reports DOM sensors through entPhySensorTable, whose entries
-		// are named "DOM RX Power Sensor for Ethernet3/29/1" rather than being
-		// keyed by ifIndex. This assumes the collector already resolves that
-		// to an ifName label and yields dBm.
+		// Arista publishes DOM readings as ENTITY-SENSOR-MIB sensors keyed by
+		// entPhysicalIndex, not by ifIndex. The interface appears only inside
+		// entPhysicalDescr, which reads "DOM RX Power Sensor for Ethernet11/1";
+		// entPhysicalName is empty on EOS, so the description is the only
+		// source for it.
+		//
+		// The reading is milliwatts rather than dBm. EOS reports
+		// entPhySensorType watts, entPhySensorScale milli and
+		// entPhySensorPrecision 4, so the raw value is mW scaled by 10^4:
+		// 8144 is 0.8144 mW, which is -0.89 dBm.
+		//
+		// Unlit optics report 0, which would convert to -Inf and trip the low
+		// power alert, so they are filtered out. The > 0 belongs only here:
+		// the other sources are already dBm, where zero and negative readings
+		// are ordinary.
 		Platform: "eos",
-		Expr:     "arista_dom_rx_power_dbm",
+		Expr: `10 * log10(label_replace((entPhySensorValue{entPhysicalDescr=~"DOM RX Power Sensor for .*"} > 0),` +
+			` "ifName", "$1", "entPhysicalDescr", "DOM RX Power Sensor for (.*)") / 10000)`,
 	},
 	{
 		// wobcom/transceiver-exporter. Confirm the interface label name and
