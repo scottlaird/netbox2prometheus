@@ -27,6 +27,12 @@ const (
 	// InterfaceDown alert already covers.
 	rxPowerFor = "8h"
 
+	// rxPowerMissingFor is shorter than rxPowerFor. A reading that has stopped
+	// arriving is a different fault from one that is drifting down, and it does
+	// not need days to confirm; it is long enough to sit out a maintenance
+	// window with an optic unplugged.
+	rxPowerMissingFor = "1h"
+
 	// ifAdminStatusDown is the ifAdminStatus value for an interface that has
 	// been shut down. The others are up(1) and testing(3).
 	ifAdminStatusDown = 2
@@ -111,9 +117,11 @@ func collectRxPowerRules(ctx context.Context, cfg *Config, client *netbox.APICli
 		return err
 	}
 
+	targets := rxPowerTargets(interfaces, platforms, slug, cfg.DomainName)
 	rules := []PromRule{rxPowerRecordRules()}
-	if monitored := rxPowerMonitoredRule(interfaces, platforms, slug, cfg.DomainName); monitored != nil {
+	if monitored := rxPowerMonitoredRule(targets); monitored != nil {
 		rules = append(rules, *monitored, rxPowerAlertRule())
+		rules = append(rules, rxPowerMissingRules(targets)...)
 	}
 
 	groups := PromRuleGroups{Groups: []PromRuleGroup{{
@@ -165,11 +173,18 @@ func rxPowerRecordRules() PromRule {
 	}
 }
 
-// rxPowerMonitoredRule narrows the union to the interfaces tagged in Netbox,
-// grouped one selector per device. It returns nil when nothing is tagged,
-// since an empty expression is not valid PromQL.
-func rxPowerMonitoredRule(interfaces []netbox.Interface, platforms map[int32]string, slug, domain string) *PromRule {
-	byDevice := map[string][]string{}
+// rxPowerTarget is one interface Netbox says to watch: the bare device name
+// for labels and prose, and the FQDN the metrics are actually keyed by.
+type rxPowerTarget struct {
+	Device   string
+	Instance string
+	IfName   string
+}
+
+// rxPowerTargets selects the tagged interfaces that could have a reading,
+// sorted so the generated rules are stable between runs.
+func rxPowerTargets(interfaces []netbox.Interface, platforms map[int32]string, slug, domain string) []rxPowerTarget {
+	targets := []rxPowerTarget{}
 	for _, iface := range interfaces {
 		device, ok := interfaceDevice(iface, slug)
 		if !ok {
@@ -182,23 +197,40 @@ func rxPowerMonitoredRule(interfaces []netbox.Interface, platforms map[int32]str
 				iface.Name, device, slug, platforms[iface.Device.Id])
 			continue
 		}
-		instance := hostname(device, domain)
-		byDevice[instance] = append(byDevice[instance], iface.Name)
+		targets = append(targets, rxPowerTarget{
+			Device:   device,
+			Instance: hostname(device, domain),
+			IfName:   iface.Name,
+		})
+	}
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].Instance != targets[j].Instance {
+			return targets[i].Instance < targets[j].Instance
+		}
+		return targets[i].IfName < targets[j].IfName
+	})
+	return targets
+}
+
+// rxPowerMonitoredRule narrows the union to the tagged interfaces, grouped one
+// selector per device. It returns nil when nothing is tagged, since an empty
+// expression is not valid PromQL.
+func rxPowerMonitoredRule(targets []rxPowerTarget) *PromRule {
+	byDevice := map[string][]string{}
+	instances := []string{}
+	for _, t := range targets {
+		if _, seen := byDevice[t.Instance]; !seen {
+			instances = append(instances, t.Instance)
+		}
+		byDevice[t.Instance] = append(byDevice[t.Instance], t.IfName)
 	}
 	if len(byDevice) == 0 {
 		return nil
 	}
 
-	instances := make([]string, 0, len(byDevice))
-	for instance := range byDevice {
-		instances = append(instances, instance)
-	}
-	sort.Strings(instances)
-
 	selectors := make([]string, 0, len(instances))
 	for _, instance := range instances {
 		names := byDevice[instance]
-		sort.Strings(names)
 		quoted := make([]string, 0, len(names))
 		for _, name := range names {
 			quoted = append(quoted, regexp.QuoteMeta(name))
@@ -211,6 +243,42 @@ func rxPowerMonitoredRule(interfaces []netbox.Interface, platforms map[int32]str
 		Record: rxPowerMonitoredMetric,
 		Expr:   strings.Join(selectors, "\nor "),
 	}
+}
+
+// rxPowerMissingRules builds one alert per tagged interface for a reading that
+// is not arriving at all.
+//
+// This cannot be one rule over the filtered metric the way the low power alert
+// is. A series that does not exist cannot be compared, so an interface that
+// stops reporting simply leaves the metric and nothing fires: no data looks
+// exactly like healthy. absent() answers "should this series be here", which
+// only makes sense one interface at a time.
+//
+// It catches an optic being pulled, and also the case that prompted it: a
+// tagged interface that never had a reading, because the transceiver is a DAC
+// or does not implement DOM.
+func rxPowerMissingRules(targets []rxPowerTarget) []PromRule {
+	rules := make([]PromRule, 0, len(targets))
+	for _, t := range targets {
+		selector := fmt.Sprintf("%s{instance=%q,ifName=%q}", rxPowerMonitoredMetric, t.Instance, t.IfName)
+		rules = append(rules, PromRule{
+			Alert: "InterfaceRxPowerMissing",
+			Expr:  fmt.Sprintf("absent(%s)", selector),
+			For:   rxPowerMissingFor,
+			Labels: map[string]string{
+				"severity":  alertSeverity,
+				"device":    t.Device,
+				"interface": t.IfName,
+			},
+			Annotations: map[string]string{
+				"summary": fmt.Sprintf("No receive power reading for %s on %s", t.IfName, t.Device),
+				"description": fmt.Sprintf("%s on %s is tagged for receive power monitoring but is not reporting a level. "+
+					"The optic may have been removed, the port shut, or the transceiver may not support digital optical monitoring.",
+					t.IfName, t.Device),
+			},
+		})
+	}
+	return rules
 }
 
 // rxPowerAlertRule is a single alert over the filtered metric. The Netbox
