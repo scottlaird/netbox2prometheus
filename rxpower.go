@@ -26,6 +26,10 @@ const (
 	// days, and a short window would only catch link flaps that the
 	// InterfaceDown alert already covers.
 	rxPowerFor = "8h"
+
+	// ifAdminStatusDown is the ifAdminStatus value for an interface that has
+	// been shut down. The others are up(1) and testing(3).
+	ifAdminStatusDown = 2
 )
 
 // rxPowerSource is one vendor's receive-power metric, as an expression that
@@ -50,8 +54,14 @@ var rxPowerSources = []rxPowerSource{
 		// snmp_exporter's shipped juniper_optics module already applies
 		// scale: .01 to jnxDomCurrentRxLaserPower, so this is dBm, and its
 		// lookups turn ifIndex into ifName.
+		//
+		// Junos reports exactly 0 for a port with no transceiver in it, which
+		// as dBm reads as a healthy 1 mW rather than as missing. On an
+		// EX4300-48MP that is all 48 copper ports. A real optic landing on
+		// exactly 0.00 would be dropped too, but it reappears on the next
+		// scrape.
 		Platform: "junos",
-		Expr:     "jnxDomCurrentRxLaserPower",
+		Expr:     "jnxDomCurrentRxLaserPower != 0",
 	},
 	{
 		// Arista publishes DOM readings as ENTITY-SENSOR-MIB sensors keyed by
@@ -134,6 +144,15 @@ func collectRxPowerRules(ctx context.Context, cfg *Config, client *netbox.APICli
 // single-lane optic just drops the vendor's extra labels. For a multi-lane
 // optic that reports per-lane series it keeps the worst lane, which is the one
 // a low-power alert should be watching.
+//
+// Administratively shut interfaces are then removed. A shut port reads at the
+// DOM floor, -40 dBm on Arista, which is true but not worth graphing or
+// alerting on: nobody expects light from a port they turned off. Operationally
+// down is deliberately left in, since a port that is enabled and dark is
+// exactly what the alert is for.
+//
+// It is `unless` rather than a join against ifAdminStatus == 1 so that a source
+// with no ifAdminStatus at all is kept. The Linux exporter has none.
 func rxPowerRecordRules() PromRule {
 	exprs := make([]string, 0, len(rxPowerSources))
 	for _, source := range rxPowerSources {
@@ -141,7 +160,8 @@ func rxPowerRecordRules() PromRule {
 	}
 	return PromRule{
 		Record: rxPowerMetric,
-		Expr:   strings.Join(exprs, "\nor "),
+		Expr: fmt.Sprintf("(\n%s\n)\nunless on (instance, ifName) (ifAdminStatus == %d)",
+			strings.Join(exprs, "\nor "), ifAdminStatusDown),
 	}
 }
 
