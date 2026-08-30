@@ -70,7 +70,7 @@ func TestRxPowerMonitoredRuleEmpty(t *testing.T) {
 }
 
 func TestRxPowerRulesYAML(t *testing.T) {
-	rules := rxPowerRecordRules()
+	rules := []PromRule{rxPowerRecordRules()}
 	monitored := rxPowerMonitoredRule(
 		[]netbox.Interface{
 			testIfaceOnDevice(1, 10, "sw1", "Ethernet1"),

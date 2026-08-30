@@ -101,7 +101,7 @@ func collectRxPowerRules(ctx context.Context, cfg *Config, client *netbox.APICli
 		return err
 	}
 
-	rules := rxPowerRecordRules()
+	rules := []PromRule{rxPowerRecordRules()}
 	if monitored := rxPowerMonitoredRule(interfaces, platforms, slug, cfg.DomainName); monitored != nil {
 		rules = append(rules, *monitored, rxPowerAlertRule())
 	}
@@ -118,23 +118,31 @@ func collectRxPowerRules(ctx context.Context, cfg *Config, client *netbox.APICli
 	return writeFile(cfg, filename, data)
 }
 
-// rxPowerRecordRules builds the vendor-neutral union, one rule per source.
-// Several rules recording the same name is how Prometheus expresses a union;
-// the series stay distinct because their instances do.
+// rxPowerRecordRules builds the vendor-neutral union as one rule.
 //
-// Each is reduced to {instance, ifName} with min(), which for a single-lane
-// optic just drops the vendor's extra labels. For a multi-lane optic that
-// reports per-lane series it keeps the worst lane, which is the one a
-// low-power alert should be watching.
-func rxPowerRecordRules() []PromRule {
-	rules := []PromRule{}
+// Several rules recording the same name would also union, since the series
+// stay distinct by instance, but promtool cannot see that and rejects the file
+// as duplicate rules. `or` says the same thing in a single rule: it takes
+// everything on the left, plus the series on the right whose label sets are
+// not already there. The sources cover different platforms and so different
+// instances, which makes the union lossless.
+//
+// Should one instance ever appear in two sources, the earlier one silently
+// wins. The order here is Junos, EOS, Linux.
+//
+// Each source is reduced to {instance, ifName} with min(), which for a
+// single-lane optic just drops the vendor's extra labels. For a multi-lane
+// optic that reports per-lane series it keeps the worst lane, which is the one
+// a low-power alert should be watching.
+func rxPowerRecordRules() PromRule {
+	exprs := make([]string, 0, len(rxPowerSources))
 	for _, source := range rxPowerSources {
-		rules = append(rules, PromRule{
-			Record: rxPowerMetric,
-			Expr:   fmt.Sprintf("min by (instance, ifName) (%s)", source.Expr),
-		})
+		exprs = append(exprs, fmt.Sprintf("min by (instance, ifName) (%s)", source.Expr))
 	}
-	return rules
+	return PromRule{
+		Record: rxPowerMetric,
+		Expr:   strings.Join(exprs, "\nor "),
+	}
 }
 
 // rxPowerMonitoredRule narrows the union to the interfaces tagged in Netbox,
