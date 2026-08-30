@@ -106,3 +106,49 @@ func TestRuleGroupsYAML(t *testing.T) {
 	}
 	t.Logf("\n%s", data)
 }
+
+func mtuIface(id, deviceID int32, device, name string, mtu *int32, enabled bool) netbox.Interface {
+	i := testInterface(id, device, name, nil)
+	i.Device.Id = deviceID
+	i.Enabled = &enabled
+	if mtu != nil {
+		i.Mtu = *netbox.NewNullableInt32(mtu)
+	}
+	return i
+}
+
+func TestInterfaceMTURules(t *testing.T) {
+	m9000, m1500 := int32(9000), int32(1500)
+	platforms := map[int32]string{10: "eos", 11: "junos"}
+	rules := interfaceMTURules([]netbox.Interface{
+		mtuIface(1, 10, "sw1", "Ethernet1", &m9000, true),
+		mtuIface(2, 10, "sw1", "Ethernet2", &m1500, true),
+		mtuIface(3, 10, "sw1", "Ethernet3", nil, true),     // no MTU in Netbox
+		mtuIface(4, 10, "sw1", "Ethernet4", &m9000, false), // disabled, exempt
+		mtuIface(5, 11, "ex1", "xe-0/0/0", &m9000, true),   // junos, offset unknown
+	}, platforms, "monitoring-if-up", "example.com")
+
+	if got, want := len(rules), 2; got != want {
+		t.Fatalf("got %d rules, want %d", got, want)
+	}
+	if got, want := rules[0].Expr, `ifMtu{instance="sw1.example.com",ifName="Ethernet1"} != 9000`; got != want {
+		t.Errorf("expr: got %q, want %q", got, want)
+	}
+	if got, want := rules[0].Alert, "InterfaceMTUMismatch"; got != want {
+		t.Errorf("alert: got %q, want %q", got, want)
+	}
+	if got, want := rules[1].Expr, `ifMtu{instance="sw1.example.com",ifName="Ethernet2"} != 1500`; got != want {
+		t.Errorf("expr: got %q, want %q", got, want)
+	}
+}
+
+// TestMTUOffsetEOS pins the measured EOS offset. Arista reports the payload
+// MTU, the same number Netbox holds.
+func TestMTUOffsetEOS(t *testing.T) {
+	if got, ok := mtuOffsets["eos"]; !ok || got != 0 {
+		t.Errorf("eos offset: got %d (present=%v), want 0", got, ok)
+	}
+	if _, ok := mtuOffsets["junos"]; ok {
+		t.Error("junos has an offset, but its ifMtu convention has not been established")
+	}
+}

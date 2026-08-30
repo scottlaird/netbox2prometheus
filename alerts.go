@@ -49,10 +49,82 @@ const (
 	// A link that is down is worth knowing about quickly. A speed mismatch is
 	// a config or negotiation problem rather than an outage, and does not
 	// flap, so it waits longer.
+	// mtuFor is long enough that a change being rolled out across a switch
+	// does not alert while it is in progress.
+	mtuFor = "30m"
+
 	alertForUp    = "5m"
 	alertForSpeed = "30m"
 	alertSeverity = "warning"
 )
+
+// mtuOffsets maps a Netbox platform to the difference between what ifMtu
+// reports and the MTU Netbox records, in bytes.
+//
+// EOS reports the payload MTU, the same number Netbox holds, so the offset is
+// zero. That is measured, not assumed: across 30 tagged interfaces on swa, 24
+// agreed exactly and the six that did not were real drift, ports sitting at
+// Arista's 9214 default where Netbox asks for 9100 or 1500.
+//
+// Junos is deliberately absent. Its physical ports report a mix: ge-0/0/0 at
+// 9014 and ge-0/0/10 at 1514, both payload plus the 14 byte header, but others
+// at 9100 with no offset, because a Junos `mtu` statement is itself an L2
+// figure. Which convention Netbox should hold for those is a decision about the
+// data rather than something to infer, so Junos interfaces are skipped with a
+// warning until one is picked. Adding a platform here is a one line change.
+var mtuOffsets = map[string]int32{
+	"eos": 0,
+}
+
+// interfaceMTURules builds one alert per interface whose configured MTU can be
+// compared against the device.
+//
+// Interfaces are skipped, with a warning rather than silently, when Netbox has
+// no MTU for them, when they are disabled in Netbox, or when their platform has
+// no known relationship between ifMtu and the Netbox value.
+func interfaceMTURules(interfaces []netbox.Interface, platforms map[int32]string, slug, domain string) []PromRule {
+	rules := []PromRule{}
+	for _, iface := range interfaces {
+		device, ok := interfaceDevice(iface, slug)
+		if !ok {
+			continue
+		}
+		if iface.Enabled != nil && !*iface.Enabled {
+			// Disabled ports are exempt from the MTU policy.
+			continue
+		}
+		if !iface.Mtu.IsSet() || iface.Mtu.Get() == nil {
+			log.Warningf("Interface %q on %q is tagged %q but has no MTU in Netbox; skipping the MTU check.",
+				iface.Name, device, slug)
+			continue
+		}
+		platform := platforms[iface.Device.Id]
+		offset, known := mtuOffsets[platform]
+		if !known {
+			log.Warningf("Interface %q on %q is on platform %q, where the relationship between ifMtu and the Netbox MTU is not established; skipping the MTU check.",
+				iface.Name, device, platform)
+			continue
+		}
+		want := *iface.Mtu.Get() + offset
+
+		rules = append(rules, PromRule{
+			Alert: "InterfaceMTUMismatch",
+			Expr:  fmt.Sprintf("%s != %d", metricSelector("ifMtu", hostname(device, domain), iface.Name), want),
+			For:   mtuFor,
+			Labels: map[string]string{
+				"severity":  alertSeverity,
+				"device":    device,
+				"interface": iface.Name,
+			},
+			Annotations: map[string]string{
+				"summary": fmt.Sprintf("MTU on %s on %s is not %d", iface.Name, device, want),
+				"description": fmt.Sprintf("Netbox records %s on %s with an MTU of %d, but the device reports {{ $value }}.",
+					iface.Name, device, *iface.Mtu.Get()),
+			},
+		})
+	}
+	return rules
+}
 
 // collectInterfaceAlerts writes a Prometheus alerting rules file covering
 // every Netbox interface tagged for monitoring.
@@ -74,7 +146,12 @@ func collectInterfaceAlerts(ctx context.Context, cfg *Config, client *netbox.API
 	if err != nil {
 		return err
 	}
+	platforms, err := devicePlatforms(ctx, client)
+	if err != nil {
+		return err
+	}
 	upRules := interfaceUpRules(upInterfaces, upSlug, cfg.DomainName)
+	upRules = append(upRules, interfaceMTURules(upInterfaces, platforms, upSlug, cfg.DomainName)...)
 	speedRules := interfaceSpeedRules(speedInterfaces, speedSlug, cfg.DomainName)
 
 	groups := PromRuleGroups{}
