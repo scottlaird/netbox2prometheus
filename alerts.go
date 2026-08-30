@@ -34,11 +34,6 @@ type PromRule struct {
 }
 
 const (
-	// kbpsPerMbps converts a Netbox interface speed into the units used by
-	// ifHighSpeed. Netbox stores speed in kbps; ifHighSpeed is in Mbps, so a
-	// 10G interface is 10000000 in Netbox and 10000 in ifHighSpeed.
-	kbpsPerMbps = 1000
-
 	// ifOperStatus values. An interface that is neither up nor down is in one
 	// of the states listed in ifOperStatusOther, which is rare enough to be
 	// worth calling out separately.
@@ -231,15 +226,11 @@ func interfaceSpeedRules(interfaces []netbox.Interface, slug, domain string) []P
 			log.Warningf("Interface %q on %q is tagged %q but has no speed in Netbox; skipping.", iface.Name, device, slug)
 			continue
 		}
-		kbps := *iface.Speed.Get()
-		if kbps%kbpsPerMbps != 0 {
-			// ifHighSpeed is a whole number of Mbps, so a speed that is not a
-			// multiple of 1000 kbps can never compare equal. Alerting on it
-			// would fire forever.
-			log.Warningf("Interface %q on %q has speed %d kbps, which is not a whole number of Mbps; skipping.", iface.Name, device, kbps)
-			continue
-		}
-		mbps := kbps / kbpsPerMbps
+		// The speed field is read as Mbps, matching ifHighSpeed directly.
+		// Netbox documents it as kbps, so this is a deliberate local
+		// convention: a 10G interface holds 10000 here, not 10000000, and the
+		// Netbox UI will render that as "10 Mbps".
+		mbps := *iface.Speed.Get()
 
 		rules = append(rules, PromRule{
 			Alert: "InterfaceSpeedMismatch",
@@ -252,7 +243,7 @@ func interfaceSpeedRules(interfaces []netbox.Interface, slug, domain string) []P
 			},
 			Annotations: map[string]string{
 				"summary":     fmt.Sprintf("Interface %s on %s is not running at %d Mbps", iface.Name, device, mbps),
-				"description": fmt.Sprintf("Netbox records %s on %s as %d kbps (%d Mbps), but ifHighSpeed reports {{ $value }} Mbps.", iface.Name, device, kbps, mbps),
+				"description": fmt.Sprintf("Netbox records %s on %s as %d Mbps, but ifHighSpeed reports {{ $value }} Mbps.", iface.Name, device, mbps),
 			},
 		})
 	}
