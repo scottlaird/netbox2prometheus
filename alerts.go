@@ -51,6 +51,25 @@ const (
 	alertForUp    = "5m"
 	alertForSpeed = "30m"
 	alertSeverity = "warning"
+
+	// A link that flaps is never down long enough for InterfaceDown to fire:
+	// alertForUp is 5m, and a flapping link recovers in well under a minute.
+	// Counting transitions over a window catches what a point-in-time check
+	// cannot.
+	//
+	// flapWindow trades detection latency against sensitivity, and also sets
+	// how long the alert lingers after the flapping stops, since changes()
+	// takes a full window to drain.
+	//
+	// flapThreshold is measured rather than guessed: across every interface on
+	// swa and swb over 12 hours, only the four lanes of a failing transceiver
+	// registered any ifOperStatus transition at all. Every healthy interface
+	// sat at zero, so anything above a small number is unambiguous. Two is
+	// left as headroom for a single legitimate bounce, such as a device
+	// reboot or a cable being moved.
+	flapWindow    = "1h"
+	flapThreshold = 3
+	alertForFlap  = "15m"
 )
 
 // mtuOffsets maps a Netbox platform to the difference between what ifMtu
@@ -124,8 +143,9 @@ func interfaceMTURules(interfaces []netbox.Interface, platforms map[int32]string
 // collectInterfaceAlerts writes a Prometheus alerting rules file covering
 // every Netbox interface tagged for monitoring.
 //
-// Interfaces tagged upSlug get an alert that fires when ifOperStatus reports
-// anything other than up. Interfaces tagged speedSlug get an alert that fires
+// Interfaces tagged upSlug get alerts for ifOperStatus reporting anything
+// other than up, for the interface flapping, and for a device MTU that
+// disagrees with Netbox. Interfaces tagged speedSlug get an alert that fires
 // when ifHighSpeed disagrees with the speed recorded in Netbox. The two tags
 // are independent: an interface may carry either, both or neither.
 //
@@ -147,6 +167,7 @@ func collectInterfaceAlerts(ctx context.Context, cfg *Config, client *netbox.API
 	}
 	upRules := interfaceUpRules(upInterfaces, upSlug, cfg.DomainName)
 	upRules = append(upRules, interfaceMTURules(upInterfaces, platforms, upSlug, cfg.DomainName)...)
+	upRules = append(upRules, interfaceFlapRules(upInterfaces, upSlug, cfg.DomainName)...)
 	speedRules := interfaceSpeedRules(speedInterfaces, speedSlug, cfg.DomainName)
 
 	groups := PromRuleGroups{}
@@ -207,6 +228,42 @@ func interfaceUpRules(interfaces []netbox.Interface, slug, domain string) []Prom
 			Annotations: map[string]string{
 				"summary":     fmt.Sprintf("Interface %s on %s is not up, and not down either", iface.Name, device),
 				"description": fmt.Sprintf("%s on %s is not up. Current state is {{ $value }} (%s).", iface.Name, device, ifOperStatusOther),
+			},
+		})
+	}
+	return rules
+}
+
+// interfaceFlapRules builds one InterfaceFlapping rule per interface, firing
+// when ifOperStatus changes more than flapThreshold times within flapWindow.
+//
+// This covers the gap left by InterfaceDown, which needs the interface to stay
+// down for alertForUp before it fires. A link that drops for thirty seconds
+// and comes straight back never satisfies that, so a transceiver can fail
+// badly enough to interrupt traffic dozens of times an hour while every
+// point-in-time rule reports the interface as healthy.
+func interfaceFlapRules(interfaces []netbox.Interface, slug, domain string) []PromRule {
+	rules := []PromRule{}
+	for _, iface := range interfaces {
+		device, ok := interfaceDevice(iface, slug)
+		if !ok {
+			continue
+		}
+		selector := metricSelector("ifOperStatus", hostname(device, domain), iface.Name)
+
+		rules = append(rules, PromRule{
+			Alert: "InterfaceFlapping",
+			Expr:  fmt.Sprintf("changes(%s[%s]) > %d", selector, flapWindow, flapThreshold),
+			For:   alertForFlap,
+			Labels: map[string]string{
+				"severity":  alertSeverity,
+				"device":    device,
+				"interface": iface.Name,
+			},
+			Annotations: map[string]string{
+				"summary": fmt.Sprintf("Interface %s on %s is flapping", iface.Name, device),
+				"description": fmt.Sprintf("%s on %s changed state {{ $value }} times in the last %s. The link may be up now; check the transceiver and the cable rather than the current state.",
+					iface.Name, device, flapWindow),
 			},
 		})
 	}

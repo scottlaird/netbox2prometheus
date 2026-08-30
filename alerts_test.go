@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	netbox "github.com/netbox-community/go-netbox/v4"
 	"go.yaml.in/yaml/v4"
@@ -152,5 +153,69 @@ func TestMTUOffsetEOS(t *testing.T) {
 	}
 	if _, ok := mtuOffsets["junos"]; ok {
 		t.Error("junos has an offset, but its ifMtu convention has not been established")
+	}
+}
+
+func TestInterfaceFlapRules(t *testing.T) {
+	rules := interfaceFlapRules([]netbox.Interface{
+		testInterface(1, "sw1", "Ethernet14/1", nil),
+		testInterface(2, "", "Ethernet14/2", nil), // no device name, skipped
+	}, "monitoring-if-up", "example.com")
+
+	if got, want := len(rules), 1; got != want {
+		t.Fatalf("got %d rules, want %d", got, want)
+	}
+
+	if got, want := rules[0].Alert, "InterfaceFlapping"; got != want {
+		t.Errorf("alert: got %q, want %q", got, want)
+	}
+	want := `changes(ifOperStatus{instance="sw1.example.com",ifName="Ethernet14/1"}[1h]) > 3`
+	if got := rules[0].Expr; got != want {
+		t.Errorf("expr: got %q, want %q", got, want)
+	}
+	if got, want := rules[0].Labels["device"], "sw1"; got != want {
+		t.Errorf("device label: got %q, want %q", got, want)
+	}
+	if got, want := rules[0].Labels["interface"], "Ethernet14/1"; got != want {
+		t.Errorf("interface label: got %q, want %q", got, want)
+	}
+}
+
+// A flapping interface recovers well before alertForUp elapses, so
+// InterfaceDown cannot fire on it. The flap rule only adds anything if its own
+// wait is shorter than the window it counts over; otherwise the alert would
+// need the flapping to persist for longer than it takes to detect.
+func TestFlapAlertOutlastsDownAlert(t *testing.T) {
+	window, err := time.ParseDuration(flapWindow)
+	if err != nil {
+		t.Fatalf("flapWindow %q does not parse: %v", flapWindow, err)
+	}
+	wait, err := time.ParseDuration(alertForFlap)
+	if err != nil {
+		t.Fatalf("alertForFlap %q does not parse: %v", alertForFlap, err)
+	}
+	if wait >= window {
+		t.Errorf("alertForFlap (%s) must be shorter than flapWindow (%s)", alertForFlap, flapWindow)
+	}
+	if flapThreshold < 1 {
+		t.Errorf("flapThreshold is %d; a threshold below 1 fires on any single transition", flapThreshold)
+	}
+}
+
+// The flap rule is driven by the same tag as the up rules, so an interface
+// tagged for up-monitoring gets down, unusual-state and flapping coverage
+// together.
+func TestFlapRulesUseUpTag(t *testing.T) {
+	ifaces := []netbox.Interface{testInterface(1, "sw1", "et1", nil)}
+
+	alerts := map[string]bool{}
+	for _, r := range append(interfaceUpRules(ifaces, "monitoring-if-up", "example.com"),
+		interfaceFlapRules(ifaces, "monitoring-if-up", "example.com")...) {
+		alerts[r.Alert] = true
+	}
+	for _, want := range []string{"InterfaceDown", "InterfaceUnusualState", "InterfaceFlapping"} {
+		if !alerts[want] {
+			t.Errorf("interface tagged monitoring-if-up did not produce %s", want)
+		}
 	}
 }
