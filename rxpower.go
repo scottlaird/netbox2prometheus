@@ -179,6 +179,29 @@ type rxPowerTarget struct {
 	Device   string
 	Instance string
 	IfName   string
+
+	// LaneBase is set when the interface is one optic spread over several
+	// lanes. A QSFP cage reports a sensor per lane, EthernetN/1 through /4,
+	// whether it is running as one 40G interface or broken out, so the reading
+	// for a whole-cage interface is the worst of its lanes rather than the
+	// value of lane 1. Empty for a single-lane interface, which matches its own
+	// sensor exactly.
+	LaneBase string
+}
+
+// laneSuffix strips a trailing lane number: Ethernet11/1 becomes Ethernet11,
+// and Ethernet31, which Netbox holds without a lane at all, is unchanged.
+var laneSuffix = regexp.MustCompile(`/[0-9]+$`)
+
+// multiLane reports whether a Netbox interface type is a QSFP of any
+// generation, which is what makes an interface span lanes. It matches qsfpp,
+// qsfp28, qsfp56, qsfp112 and qsfpdd alike, and not the sfpp and sfp28 types
+// whose names it is a superstring of.
+func multiLane(iface netbox.Interface) bool {
+	if iface.Type.Value == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(*iface.Type.Value)), "qsfp")
 }
 
 // rxPowerTargets selects the tagged interfaces that could have a reading,
@@ -197,11 +220,15 @@ func rxPowerTargets(interfaces []netbox.Interface, platforms map[int32]string, s
 				iface.Name, device, slug, platforms[iface.Device.Id])
 			continue
 		}
-		targets = append(targets, rxPowerTarget{
+		target := rxPowerTarget{
 			Device:   device,
 			Instance: hostname(device, domain),
 			IfName:   iface.Name,
-		})
+		}
+		if multiLane(iface) {
+			target.LaneBase = laneSuffix.ReplaceAllString(iface.Name, "")
+		}
+		targets = append(targets, target)
 	}
 	sort.Slice(targets, func(i, j int) bool {
 		if targets[i].Instance != targets[j].Instance {
@@ -212,19 +239,34 @@ func rxPowerTargets(interfaces []netbox.Interface, platforms map[int32]string, s
 	return targets
 }
 
-// rxPowerMonitoredRule narrows the union to the tagged interfaces, grouped one
-// selector per device. It returns nil when nothing is tagged, since an empty
-// expression is not valid PromQL.
+// rxPowerMonitoredRule narrows the union to the tagged interfaces. It returns
+// nil when nothing is tagged, since an empty expression is not valid PromQL.
+//
+// Single-lane interfaces are grouped one selector per device, since they match
+// their own sensor by name. A multi-lane interface needs a clause of its own:
+// its reading is the worst of the cage's lanes, relabelled back to the name
+// Netbox knows it by, so that everything downstream still sees one series per
+// interface.
 func rxPowerMonitoredRule(targets []rxPowerTarget) *PromRule {
 	byDevice := map[string][]string{}
 	instances := []string{}
+	laneClauses := []string{}
 	for _, t := range targets {
+		if t.LaneBase != "" {
+			// Aggregate first, then relabel. Rewriting ifName before the
+			// min would give several lanes the same label set, which is not a
+			// legal vector, so Prometheus rejects the expression outright.
+			laneClauses = append(laneClauses, fmt.Sprintf(
+				"label_replace(min by (instance) (%s{instance=%q,ifName=~%q}), \"ifName\", %q, \"instance\", \".*\")",
+				rxPowerMetric, t.Instance, regexp.QuoteMeta(t.LaneBase)+"/[0-9]+", t.IfName))
+			continue
+		}
 		if _, seen := byDevice[t.Instance]; !seen {
 			instances = append(instances, t.Instance)
 		}
 		byDevice[t.Instance] = append(byDevice[t.Instance], t.IfName)
 	}
-	if len(byDevice) == 0 {
+	if len(byDevice) == 0 && len(laneClauses) == 0 {
 		return nil
 	}
 
@@ -238,6 +280,8 @@ func rxPowerMonitoredRule(targets []rxPowerTarget) *PromRule {
 		selectors = append(selectors, fmt.Sprintf("%s{instance=%q,ifName=~%q}",
 			rxPowerMetric, instance, strings.Join(quoted, "|")))
 	}
+
+	selectors = append(selectors, laneClauses...)
 
 	return &PromRule{
 		Record: rxPowerMonitoredMetric,
