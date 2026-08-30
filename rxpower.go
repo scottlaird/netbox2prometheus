@@ -46,6 +46,13 @@ type rxPowerSource struct {
 	Platform string
 	// Expr yields receive power in dBm, before label normalisation.
 	Expr string
+	// InstanceHasPort marks a source scraped straight from an exporter on the
+	// monitored host, where Prometheus sets instance to "host:port". The SNMP
+	// sources are scraped through an exporter that sets instance to the
+	// device's FQDN instead, so those two disagree on what an instance is
+	// called. rxPowerRecordRules rewrites this form to the FQDN so every
+	// source keys the same way, which is what lets the union work at all.
+	InstanceHasPort bool
 }
 
 // rxPowerSources maps Netbox platforms to the metric that carries their
@@ -90,13 +97,18 @@ var rxPowerSources = []rxPowerSource{
 			` "ifName", "$1", "entPhysicalDescr", "DOM RX Power Sensor for (.*)") / 10000)`,
 	},
 	{
-		// wobcom/transceiver-exporter. Confirm the interface label name and
-		// whether your build emits dBm: the published README documents only
-		// transceiver_exporter_laser_rx_power_milliwatts and says to convert
-		// with 10*log10() yourself. If yours emits milliwatts, use:
-		//   10 * log10(transceiver_exporter_laser_rx_power_milliwatts)
-		Platform: "linux",
-		Expr:     `label_replace(transceiver_exporter_laser_rx_power_dbm, "ifName", "$1", "interface", "(.*)")`,
+		// wobcom/transceiver-exporter, scraped on the host itself. Unlike the
+		// two SNMP sources this one does the conversion, publishing dBm
+		// directly, so there is no log10 here.
+		//
+		// A multi-lane module reports one series per lane, distinguished by a
+		// laser_index label rather than by separate interface names the way
+		// EOS does. The min by (instance, ifName) that wraps every source
+		// collapses those to the worst lane without needing anything specific
+		// here.
+		Platform:        "linux",
+		Expr:            `label_replace(transceiver_laser_rx_power_dbm, "ifName", "$1", "interface", "(.*)")`,
+		InstanceHasPort: true,
 	},
 }
 
@@ -118,7 +130,7 @@ func collectRxPowerRules(ctx context.Context, cfg *Config, client *netbox.APICli
 	}
 
 	targets := rxPowerTargets(interfaces, platforms, slug, cfg.DomainName)
-	rules := []PromRule{rxPowerRecordRules()}
+	rules := []PromRule{rxPowerRecordRules(cfg.DomainName)}
 	if monitored := rxPowerMonitoredRule(targets); monitored != nil {
 		rules = append(rules, *monitored, rxPowerAlertRule())
 		rules = append(rules, rxPowerMissingRules(targets)...)
@@ -161,10 +173,15 @@ func collectRxPowerRules(ctx context.Context, cfg *Config, client *netbox.APICli
 //
 // It is `unless` rather than a join against ifAdminStatus == 1 so that a source
 // with no ifAdminStatus at all is kept. The Linux exporter has none.
-func rxPowerRecordRules() PromRule {
+func rxPowerRecordRules(domain string) PromRule {
 	exprs := make([]string, 0, len(rxPowerSources))
 	for _, source := range rxPowerSources {
-		exprs = append(exprs, fmt.Sprintf("min by (instance, ifName) (%s)", source.Expr))
+		expr := source.Expr
+		if source.InstanceHasPort {
+			expr = fmt.Sprintf(`label_replace(%s, "instance", "${1}.%s", "instance", "([^:]+):[0-9]+")`,
+				expr, domain)
+		}
+		exprs = append(exprs, fmt.Sprintf("min by (instance, ifName) (%s)", expr))
 	}
 	return PromRule{
 		Record: rxPowerMetric,
