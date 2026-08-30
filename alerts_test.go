@@ -53,12 +53,14 @@ func TestInterfaceSpeedRules(t *testing.T) {
 		speed    *int32
 		wantExpr string // empty means the interface should be skipped
 	}{
-		{"10G", ptr(10000000), `ifHighSpeed{instance="sw1.example.com",ifName="et1"} != 10000`},
-		{"1G", ptr(1000000), `ifHighSpeed{instance="sw1.example.com",ifName="et1"} != 1000`},
-		{"100M", ptr(100000), `ifHighSpeed{instance="sw1.example.com",ifName="et1"} != 100`},
-		{"25G", ptr(25000000), `ifHighSpeed{instance="sw1.example.com",ifName="et1"} != 25000`},
+		{"10G", ptr(10000), `ifHighSpeed{instance="sw1.example.com",ifName="et1"} != 10000`},
+		{"1G", ptr(1000), `ifHighSpeed{instance="sw1.example.com",ifName="et1"} != 1000`},
+		{"100M", ptr(100), `ifHighSpeed{instance="sw1.example.com",ifName="et1"} != 100`},
+		{"25G", ptr(25000), `ifHighSpeed{instance="sw1.example.com",ifName="et1"} != 25000`},
 		{"unset speed", nil, ""},
-		{"not a whole Mbps", ptr(1544), ""},
+		// Read as Mbps, so a kbps-style value is now taken at face value
+		// rather than divided. Netbox holding 10000000 means 10 Tbps here.
+		{"kbps-style value is not converted", ptr(10000000), `ifHighSpeed{instance="sw1.example.com",ifName="et1"} != 10000000`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
