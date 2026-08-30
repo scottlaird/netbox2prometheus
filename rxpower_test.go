@@ -91,6 +91,26 @@ func TestRxPowerRulesYAML(t *testing.T) {
 // TestRxPowerSourcesEOS pins the Arista conversion, which is easy to get wrong:
 // EOS reports milliwatts scaled by 10^4, not dBm, and carries the interface
 // name only inside entPhysicalDescr.
+// TestRxPowerRecordRuleFilters covers the two exclusions, which are easy to
+// drop by accident and fail quietly: an administratively shut port reads at the
+// DOM floor, and Junos reports 0 for a port with no transceiver.
+func TestRxPowerRecordRuleFilters(t *testing.T) {
+	expr := rxPowerRecordRules().Expr
+	for _, want := range []string{
+		"unless on (instance, ifName) (ifAdminStatus == 2)",
+		"jnxDomCurrentRxLaserPower != 0",
+	} {
+		if !strings.Contains(expr, want) {
+			t.Errorf("union expr missing %q:\n%s", want, expr)
+		}
+	}
+	// unless, not a join on ifAdminStatus == 1: a source without ifAdminStatus
+	// at all must survive.
+	if strings.Contains(expr, "ifAdminStatus == 1") {
+		t.Errorf("union joins on admin-up, which would drop sources lacking ifAdminStatus:\n%s", expr)
+	}
+}
+
 func TestRxPowerSourcesEOS(t *testing.T) {
 	var expr string
 	for _, source := range rxPowerSources {
