@@ -203,6 +203,11 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
+	err = collectRxPowerRules(ctx, cfg, c, "monitoring-if-rxpower", "rules_transceivers.yml")
+	if err != nil {
+		panic(err)
+	}
 }
 
 func collectTargets(ctx context.Context, cfg *Config, client *netbox.APIClient, labels map[string]string, slug string, port string, filename string) error {
