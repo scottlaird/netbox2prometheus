@@ -198,6 +198,11 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
+	err = collectInterfaceAlerts(ctx, cfg, c, "monitoring-if-up", "monitoring-if-speed", "alerts_interfaces.yml")
+	if err != nil {
+		panic(err)
+	}
 }
 
 func collectTargets(ctx context.Context, cfg *Config, client *netbox.APIClient, labels map[string]string, slug string, port string, filename string) error {
