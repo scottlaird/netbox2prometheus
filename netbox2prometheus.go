@@ -198,6 +198,18 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	err = collectTargets(ctx, cfg, c, labels, "monitoring-snmp-juniper", "", "targets_snmp_juniper.yml")
+	if err != nil {
+		panic(err)
+	}
+	err = collectTargets(ctx, cfg, c, labels, "monitoring-snmp-arista", "", "targets_snmp_arista.yml")
+	if err != nil {
+		panic(err)
+	}
+	err = collectTargets(ctx, cfg, c, labels, "monitoring-snmp-vyos", "", "targets_snmp_vyos.yml")
+	if err != nil {
+		panic(err)
+	}
 
 	err = collectInterfaceAlerts(ctx, cfg, c, "monitoring-if-up", "monitoring-if-speed", "alerts_interfaces.yml")
 	if err != nil {
