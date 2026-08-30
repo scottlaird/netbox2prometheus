@@ -68,7 +68,7 @@ func TestRxPowerMonitoredRuleEmpty(t *testing.T) {
 }
 
 func TestRxPowerRulesYAML(t *testing.T) {
-	rules := []PromRule{rxPowerRecordRules()}
+	rules := []PromRule{rxPowerRecordRules("example.com")}
 	monitored := rxPowerMonitoredRule(rxPowerTargets([]netbox.Interface{
 		testIfaceOnDevice(1, 10, "sw1", "Ethernet1"),
 		testIfaceOnDevice(2, 11, "ex1", "xe-0/0/1"),
@@ -91,7 +91,7 @@ func TestRxPowerRulesYAML(t *testing.T) {
 // drop by accident and fail quietly: an administratively shut port reads at the
 // DOM floor, and Junos reports 0 for a port with no transceiver.
 func TestRxPowerRecordRuleFilters(t *testing.T) {
-	expr := rxPowerRecordRules().Expr
+	expr := rxPowerRecordRules("example.com").Expr
 	for _, want := range []string{
 		"unless on (instance, ifName) (ifAdminStatus == 2)",
 		"jnxDomCurrentRxLaserPower != 0",
@@ -216,5 +216,46 @@ func TestRxPowerMonitoredRuleLanes(t *testing.T) {
 	// which is not a legal vector, and Prometheus rejects the whole expression.
 	if strings.Contains(rule.Expr, `min by (instance, ifName) (label_replace`) {
 		t.Errorf("expr relabels before aggregating:\n%s", rule.Expr)
+	}
+}
+
+// TestRxPowerSourcesLinux pins the two things that make the Linux source
+// different from the SNMP ones: transceiver-exporter already publishes dBm, so
+// applying a log10 to it would be wrong, and it is scraped on the host, so its
+// instance label is "host:port" rather than the FQDN the rest of the union
+// keys on.
+func TestRxPowerSourcesLinux(t *testing.T) {
+	var source rxPowerSource
+	for _, s := range rxPowerSources {
+		if s.Platform == "linux" {
+			source = s
+		}
+	}
+	if source.Platform == "" {
+		t.Fatal("no linux source found")
+	}
+	if !strings.Contains(source.Expr, "transceiver_laser_rx_power_dbm") {
+		t.Errorf("linux source does not read transceiver_laser_rx_power_dbm:\n%s", source.Expr)
+	}
+	if strings.Contains(source.Expr, "log10") {
+		t.Errorf("linux source applies log10, but the exporter already emits dBm:\n%s", source.Expr)
+	}
+	if !source.InstanceHasPort {
+		t.Error("linux source is scraped on the host, so InstanceHasPort must be set")
+	}
+}
+
+// The instance rewrite has to produce the same FQDN that rxPowerTargets builds
+// with hostname(), or the union and the filtered metric key on different
+// strings and the Linux series silently never match.
+func TestRxPowerRecordRuleNormalisesExporterInstance(t *testing.T) {
+	expr := rxPowerRecordRules("example.com").Expr
+	want := `"instance", "${1}.example.com", "instance", "([^:]+):[0-9]+"`
+	if !strings.Contains(expr, want) {
+		t.Errorf("union does not rewrite the exporter instance to an FQDN;\nwant substring: %s\ngot:\n%s", want, expr)
+	}
+	// The SNMP sources already carry an FQDN and must not be rewritten.
+	if strings.Count(expr, "([^:]+):[0-9]+") != 1 {
+		t.Errorf("instance rewrite applied to more than the exporter source:\n%s", expr)
 	}
 }

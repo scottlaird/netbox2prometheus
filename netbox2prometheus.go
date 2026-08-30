@@ -211,6 +211,11 @@ func main() {
 		panic(err)
 	}
 
+	err = collectTargets(ctx, cfg, c, labels, "monitoring-transceiver_exporter", "9458", "targets_transceiver.yml")
+	if err != nil {
+		panic(err)
+	}
+
 	err = collectInterfaceAlerts(ctx, cfg, c, "monitoring-if-up", "monitoring-if-speed", "alerts_interfaces.yml")
 	if err != nil {
 		panic(err)
