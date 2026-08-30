@@ -24,7 +24,7 @@ func TestRxPowerMonitoredRule(t *testing.T) {
 		testIfaceOnDevice(5, 13, "rtr1", "Gi0/1"), // unknown platform, dropped
 	}
 
-	rule := rxPowerMonitoredRule(interfaces, platforms, "monitoring-if-rxpower", "example.com")
+	rule := rxPowerMonitoredRule(rxPowerTargets(interfaces, platforms, "monitoring-if-rxpower", "example.com"))
 	if rule == nil {
 		t.Fatal("got nil rule, want one")
 	}
@@ -52,9 +52,7 @@ func TestRxPowerMonitoredRule(t *testing.T) {
 // TestRxPowerMonitoredRuleEscapesRegex covers interface names containing regex
 // metacharacters, which would otherwise match more than intended.
 func TestRxPowerMonitoredRuleEscapesRegex(t *testing.T) {
-	rule := rxPowerMonitoredRule(
-		[]netbox.Interface{testIfaceOnDevice(1, 10, "sw1", "Ethernet1.100")},
-		map[int32]string{10: "eos"}, "monitoring-if-rxpower", "example.com")
+	rule := rxPowerMonitoredRule(rxPowerTargets([]netbox.Interface{testIfaceOnDevice(1, 10, "sw1", "Ethernet1.100")}, map[int32]string{10: "eos"}, "monitoring-if-rxpower", "example.com"))
 	if rule == nil {
 		t.Fatal("got nil rule, want one")
 	}
@@ -64,19 +62,17 @@ func TestRxPowerMonitoredRuleEscapesRegex(t *testing.T) {
 }
 
 func TestRxPowerMonitoredRuleEmpty(t *testing.T) {
-	if rule := rxPowerMonitoredRule(nil, nil, "monitoring-if-rxpower", "example.com"); rule != nil {
+	if rule := rxPowerMonitoredRule(rxPowerTargets(nil, nil, "monitoring-if-rxpower", "example.com")); rule != nil {
 		t.Errorf("got %+v, want nil for no tagged interfaces", rule)
 	}
 }
 
 func TestRxPowerRulesYAML(t *testing.T) {
 	rules := []PromRule{rxPowerRecordRules()}
-	monitored := rxPowerMonitoredRule(
-		[]netbox.Interface{
-			testIfaceOnDevice(1, 10, "sw1", "Ethernet1"),
-			testIfaceOnDevice(2, 11, "ex1", "xe-0/0/1"),
-		},
-		map[int32]string{10: "eos", 11: "junos"}, "monitoring-if-rxpower", "example.com")
+	monitored := rxPowerMonitoredRule(rxPowerTargets([]netbox.Interface{
+		testIfaceOnDevice(1, 10, "sw1", "Ethernet1"),
+		testIfaceOnDevice(2, 11, "ex1", "xe-0/0/1"),
+	}, map[int32]string{10: "eos", 11: "junos"}, "monitoring-if-rxpower", "example.com"))
 	rules = append(rules, *monitored, rxPowerAlertRule())
 
 	data, err := yaml.Marshal(&PromRuleGroups{Groups: []PromRuleGroup{
@@ -134,5 +130,33 @@ func TestRxPowerSourcesEOS(t *testing.T) {
 	}
 	if strings.Contains(expr, "entPhysicalName") {
 		t.Errorf("eos expr uses entPhysicalName, which is empty on EOS:\n%s", expr)
+	}
+}
+
+func TestRxPowerMissingRules(t *testing.T) {
+	targets := rxPowerTargets([]netbox.Interface{
+		testIfaceOnDevice(1, 10, "sw1", "Ethernet2"),
+		testIfaceOnDevice(2, 10, "sw1", "Ethernet1"),
+		testIfaceOnDevice(3, 13, "rtr1", "Gi0/1"), // unknown platform, dropped
+	}, map[int32]string{10: "eos", 13: "ios"}, "monitoring-if-rxpower", "example.com")
+
+	rules := rxPowerMissingRules(targets)
+	if got, want := len(rules), 2; got != want {
+		t.Fatalf("got %d rules, want %d", got, want)
+	}
+	// Sorted, so Ethernet1 comes first.
+	if got, want := rules[0].Expr,
+		`absent(interface:rx_power_dbm:monitored{instance="sw1.example.com",ifName="Ethernet1"})`; got != want {
+		t.Errorf("expr: got %q, want %q", got, want)
+	}
+	if got, want := rules[0].Alert, "InterfaceRxPowerMissing"; got != want {
+		t.Errorf("alert: got %q, want %q", got, want)
+	}
+	// An equality matcher, not a regex: absent() only carries labels through
+	// for equality matchers, so the alert would otherwise lose instance/ifName.
+	for _, r := range rules {
+		if strings.Contains(r.Expr, "=~") {
+			t.Errorf("expr uses a regex matcher, which absent() cannot carry labels through:\n%s", r.Expr)
+		}
 	}
 }
