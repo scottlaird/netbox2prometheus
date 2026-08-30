@@ -160,3 +160,61 @@ func TestRxPowerMissingRules(t *testing.T) {
 		}
 	}
 }
+
+func typedIface(id, deviceID int32, device, name, typ string) netbox.Interface {
+	i := testIfaceOnDevice(id, deviceID, device, name)
+	v := netbox.InterfaceTypeValue(typ)
+	i.Type = netbox.InterfaceType{Value: &v}
+	return i
+}
+
+func TestMultiLane(t *testing.T) {
+	tests := []struct {
+		typ  string
+		want bool
+	}{
+		{"40gbase-x-qsfpp", true},
+		{"100gbase-x-qsfp28", true},
+		{"400gbase-x-qsfpdd", true},
+		{"10gbase-x-sfpp", false},
+		{"25gbase-x-sfp28", false}, // sfp28, not qsfp28
+		{"1000base-t", false},
+	}
+	for _, tt := range tests {
+		if got := multiLane(typedIface(1, 10, "sw1", "Ethernet1", tt.typ)); got != tt.want {
+			t.Errorf("multiLane(%s): got %v, want %v", tt.typ, got, tt.want)
+		}
+	}
+}
+
+// TestRxPowerMonitoredRuleLanes covers a QSFP reading as the worst of its
+// lanes, while a broken-out cage keeps one series per lane.
+func TestRxPowerMonitoredRuleLanes(t *testing.T) {
+	targets := rxPowerTargets([]netbox.Interface{
+		typedIface(1, 10, "sw1", "Ethernet11/1", "40gbase-x-qsfpp"), // whole cage
+		typedIface(2, 10, "sw1", "Ethernet31", "40gbase-x-qsfpp"),   // cage, no lane suffix
+		typedIface(3, 10, "sw1", "Ethernet25/2", "10gbase-x-sfpp"),  // broken out
+	}, map[int32]string{10: "eos"}, "monitoring-if-rxpower", "example.com")
+
+	rule := rxPowerMonitoredRule(targets)
+	if rule == nil {
+		t.Fatal("got nil rule, want one")
+	}
+	for _, want := range []string{
+		// Single-lane keeps an exact match.
+		`ifName=~"Ethernet25/2"`,
+		// A cage aggregates its lanes and is relabelled to the Netbox name.
+		`label_replace(min by (instance) (interface:rx_power_dbm{instance="sw1.example.com",ifName=~"Ethernet11/[0-9]+"}), "ifName", "Ethernet11/1", "instance", ".*")`,
+		// Netbox holds this one without a lane suffix; the lanes are still there.
+		`ifName=~"Ethernet31/[0-9]+"`,
+	} {
+		if !strings.Contains(rule.Expr, want) {
+			t.Errorf("expr missing %q:\n%s", want, rule.Expr)
+		}
+	}
+	// Relabelling before the aggregation would give the lanes one label set,
+	// which is not a legal vector, and Prometheus rejects the whole expression.
+	if strings.Contains(rule.Expr, `min by (instance, ifName) (label_replace`) {
+		t.Errorf("expr relabels before aggregating:\n%s", rule.Expr)
+	}
+}
