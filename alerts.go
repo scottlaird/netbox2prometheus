@@ -22,9 +22,11 @@ type PromRuleGroup struct {
 	Rules []PromRule `yaml:"rules"`
 }
 
-// PromRule is a single alerting rule.
+// PromRule is a single alerting or recording rule. Exactly one of Alert and
+// Record is set.
 type PromRule struct {
-	Alert       string            `yaml:"alert"`
+	Alert       string            `yaml:"alert,omitempty"`
+	Record      string            `yaml:"record,omitempty"`
 	Expr        string            `yaml:"expr"`
 	For         string            `yaml:"for,omitempty"`
 	Labels      map[string]string `yaml:"labels,omitempty"`
