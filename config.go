@@ -36,7 +36,7 @@ type Config struct {
 	DNSServer    string `json:"dns_server,omitempty"`
 	ICMPInterval string `json:"icmp_interval,omitempty"`
 	ICMPTimeout  string `json:"icmp_timeout,omitempty"`
-	ICMPCount    int    `jcon:"icmp_count,omitempty"`
+	ICMPCount    int    `json:"icmp_count,omitempty"`
 
 	DomainName          string `json:"domain_name,omitempty"`
 	PrometheusDirectory string `json:"prometheus_directory,omitempty"`
